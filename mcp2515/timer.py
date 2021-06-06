@@ -2,8 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 """Provides a simple timer class; see `Timer`"""
-from time import monotonic
-
+from time import time
 
 class Timer:
     """A reusable class to track timeouts, like an egg timer"""
@@ -21,9 +20,9 @@ class Timer:
         Returns:
             bool: True if more than `timeout` seconds has past since it was set
         """
-        return (monotonic() - self._start_time) > self._timeout
+        return (time() - self._start_time) > self._timeout
 
     def rewind_to(self, new_timeout):
         """Re-wind the timer to a new timeout and start ticking"""
         self._timeout = float(new_timeout)
-        self._start_time = monotonic()
+        self._start_time = time()

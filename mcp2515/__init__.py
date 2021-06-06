@@ -2,33 +2,16 @@
 #
 # SPDX-License-Identifier: MIT
 """
-`adafruit_mcp2515`
-================================================================================
-
-A CircuitPython library for working with the MCP2515 CAN bus controller using the
-CircuitPython `canio` API
-
+Generic Micropython MCP2515 library ported from CircuitPython library.
 
 * Author(s): Bryan Siepert
-
-Implementation Notes
---------------------
-
-**Hardware:**
-
-**Software and Dependencies:**
-
-* Adafruit CircuitPython firmware for the supported boards:
-  https://github.com/adafruit/circuitpython/releases
-
-* Adafruit's Bus Device library: https://github.com/adafruit/Adafruit_CircuitPython_BusDevice
 """
-
 from collections import namedtuple
 from struct import unpack_from, pack_into
 from time import sleep
 from micropython import const
-import adafruit_bus_device.spi_device as spi_device
+from machine import Pin
+# import adafruit_bus_device.spi_device as spi_device
 from .canio import *
 from .timer import Timer
 
@@ -185,7 +168,11 @@ _BAUD_RATES = {
     20000: (0x0F, 0xFF, 0x87),
     10000: (0x1F, 0xFF, 0x87),
     5000: (0x3F, 0xFF, 0x87),
-    666000: (0x00, 0xA0, 0x04),
+
+    # Calculated using https://www.kvaser.com/support/calculators/bit-timing-calculator/#
+    # for 8Mhz quartz, SJW=1, sampling = 75%
+    1: (0x00, 0x91, 0x01), # 500 kbit/s
+    2: (0x00, 0xac, 0x03), # 250
 }
 
 
@@ -219,38 +206,13 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         baudrate: int = 250000,
         loopback: bool = False,
         silent: bool = False,
-        auto_restart: bool = False,
-        debug: bool = False
     ):
-        """A common shared-bus protocol.
-
-        :param ~busio.SPI spi: The SPI bus used to communicate with the MCP2515
-        :param ~digitalio.DigitalInOut cs_pin:  SPI bus enable pin
-        :param int baudrate: The bit rate of the bus in Hz, using a 16Mhz crystal. All devices on\
-            the bus must agree on this value. Defaults to 250000.
-        :param bool loopback: Receive only packets sent from this device, and send only to this\
-        device. Requires that `silent` is also set to `True`, but only prevents transmission to\
-        other devices. Otherwise the send/receive behavior is normal.
-        :param bool silent: When `True` the controller does not transmit and all messages are\
-        received, ignoring errors and filters. This mode can be used to “sniff” a CAN bus without\
-        interfering. Defaults to `False`.
-        :param bool auto_restart: **Not supported by hardware. An `AttributeError` will be raised\
-        if `auto_restart` is set to `True`** If `True`, will restart communications after entering\
-        bus-off state. Defaults to `False`.
-
-        :param bool debug: If `True`, will enable printing debug information. Defaults to `False`.
-        """
+        """A common shared-bus protocol."""
 
         if loopback and not silent:
             raise AttributeError("Loopback mode requires silent to be set")
-        if auto_restart:
-            raise AttributeError("`auto-restart` is not supported by hardware")
-
-        self._auto_restart = auto_restart
-        self._debug = debug
-        self._bus_device_obj = spi_device.SPIDevice(spi_bus, cs_pin)
+        self._spi_bus = spi_bus
         self._cs_pin = cs_pin
-        self._buffer = bytearray(20)
         self._id_buffer = bytearray(4)
         self._unread_message_queue = []
         self._timer = Timer()
@@ -261,7 +223,6 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         self._filters_in_use = [[], []]
         self._mode = None
         self._bus_state = BusState.ERROR_ACTIVE
-        self._baudrate = baudrate
         self._loopback = loopback
         self._silent = silent
         self._baudrate = baudrate
@@ -339,7 +300,6 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         Args:
             message (canio.Message): The message to send. Must be a valid `canio.Message`
         """
-
         # TODO: Timeout
         tx_buff = self._get_tx_buffer()  # info = addr.
         if tx_buff is None:
@@ -370,28 +330,25 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         return self._unread_message_queue.pop(0)
 
     def _read_rx_buffer(self, read_command):
-        for i in range(len(self._buffer)):
-            self._buffer[i] = 0
-
         # read from buffer
-        with self._bus_device_obj as spi:
-            self._buffer[0] = read_command
-            spi.write_readinto(
-                self._buffer,  # because the reference does similar
-                self._buffer,
-                out_start=0,
-                out_end=1,
-                in_start=0,
-                in_end=1,
+        try:
+            buf = bytearray([read_command])
+            self._cs_pin.value(0)
+            self._spi_bus.write_readinto(
+                buf,  # because the reference does similar
+                buf,
             )
 
-            spi.readinto(self._buffer, end=15)
+            buf = bytearray(15)
+            self._spi_bus.readinto(buf)
         ######### Unpack IDs/ set Extended #######
+        finally:
+            self._cs_pin.value(1)
 
-        raw_ids = unpack_from(">I", self._buffer)[0]
+        raw_ids = unpack_from(">I", buf)[0]
         extended, sender_id = self._unload_ids(raw_ids)
         ############# Length/RTR Size #########
-        dlc = self._buffer[4]
+        dlc = buf[4]
         # length is max 8
         message_length = min(8, dlc & 0xF)
 
@@ -402,7 +359,7 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         else:
             frame_obj = Message(
                 sender_id,
-                data=bytes(self._buffer[5 : 5 + message_length]),
+                data=bytes(buf[5 : 5 + message_length]),
                 extended=extended,
             )
         self._unread_message_queue.append(frame_obj)
@@ -423,7 +380,6 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
             self._read_rx_buffer(_READ_RX1)
 
     def _write_message(self, tx_buffer, message_obj):
-
         if tx_buffer is None:
             raise RuntimeError("No transmit buffer available to send")
         if isinstance(message_obj, RemoteTransmissionRequest):
@@ -445,28 +401,26 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         # this splits up the id header, dlc (len, rtr status), and message buffer
         # TODO: check if we can send in one buffer, in which case `id_buffer` isn't needed
 
-        with self._bus_device_obj as spi:
+        try:
+            self._cs_pin.value(0)
             # send write command for the given buffer
-            self._buffer[0] = load_command
-            # spi.write(self._buffer, end=1)
-            spi.write_readinto(
-                self._buffer,  # because the reference does similar
-                self._buffer,
-                out_start=0,
-                out_end=1,
-                in_start=0,
-                in_end=1,
+            buf = bytearray([load_command])
+            self._spi_bus.write_readinto(
+                buf,  # because the reference does similar
+                buf,
             )
 
             # send id bytes
-            spi.write(self._id_buffer, end=4)
+            self._spi_bus.write(self._id_buffer)
 
             # send DLC
 
-            spi.write(bytearray([dlc]))
+            self._spi_bus.write(bytearray([dlc]))
             # send message bytes, limit to 8?
             if isinstance(message_obj, Message):
-                spi.write(message_obj.data, end=8)
+                self._spi_bus.write(message_obj.data)
+        finally:
+            self._cs_pin.value(1)
 
         # send the frame based on the current buffers
         self._start_transmit(tx_buffer)
@@ -475,16 +429,15 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
     # TODO: Priority
     def _start_transmit(self, tx_buffer):
         #
-        self._buffer[0] = tx_buffer.SEND_CMD
-        with self._bus_device_obj as spi:
-            spi.write_readinto(
-                self._buffer,  # because the reference does similar
-                self._buffer,
-                out_start=0,
-                out_end=1,
-                in_start=0,
-                in_end=1,
+        buf = bytearray([tx_buffer.SEND_CMD])
+        try:
+            self._cs_pin.value(0)
+            self._spi_bus.write_readinto(
+                buf,  # because the reference does similar
+                buf,
             )
+        finally:
+            self._cs_pin.value(1)
 
     def _set_filter_register(self, filter_index, mask, extended):
         filter_reg_addr = FILTERS[filter_index]
@@ -536,14 +489,6 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
             # shift up to fit all 4 bytes
             final_id = std_id << (16 + 5)
 
-        # top = (final_id & EXTID_TOP_11_READ_MASK) >> 21
-        # flags = (final_id & (0x7 << 18)) >> 18
-        # bottom = final_id & EXTID_BOTTOM_18_MASK
-        # print(
-        #     "final final_id: 0b{top:011b} {flags:03b} {bottom:018b}".format(
-        #         top=top, flags=flags, bottom=bottom
-        #     )
-        # )
         pack_into(">I", self._id_buffer, 0, final_id)
 
     def _write_id_to_register(self, register, can_id, extended=False):
@@ -556,22 +501,19 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         self._load_id_buffer(can_id, extended)
 
         # write with buffer
-        with self._bus_device_obj as spi:
+        try:
+            self._cs_pin.value(0)
             # send write command for the given bufferf
-            self._buffer[0] = _WRITE
-            self._buffer[1] = register
-            # spi.write(self._buffer, end=1)
-            spi.write_readinto(
-                self._buffer,  # because the reference does similar
-                self._buffer,
-                out_start=0,
-                out_end=2,
-                in_start=0,
-                in_end=2,
+            buf = bytearray([_WRITE, register])
+            self._spi_bus.write_readinto(
+                buf,  # because the reference does similar
+                buf,
             )
 
             # send id bytes
-            spi.write(self._id_buffer, end=4)
+            self._spi_bus.write(self._id_buffer)
+        finally:
+            self._cs_pin.value(1)
 
         self._set_mode(current_mode)
 
@@ -582,7 +524,6 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         # TODO: this should return a tuple of busy states
         # byte status = mcp2515_readStatus() & MCP_STAT_TX_PENDING_MASK
         status = self._read_status()
-        self._dbg("Status byte:", "{:#010b}".format(status))
         return (
             bool(status & _STAT_TX0_PENDING),
             bool(status & _STAT_TX1_PENDING),
@@ -595,7 +536,6 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         # check all buffers by looking for match on
         txs_busy = self._tx_buffers_in_use
         if all(txs_busy):
-            self._dbg("none available!")
             return None
         buffer_index = txs_busy.index(False)  # => self._tx_buffers
         tx_buffer = self._tx_buffers[buffer_index]
@@ -604,7 +544,6 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         return tx_buffer
 
     def _set_baud_rate(self):
-
         # *******8 set baud rate ***********
         cnf1, cnf2, cnf3 = _BAUD_RATES[self.baudrate]
 
@@ -614,9 +553,12 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         sleep(0.010)
 
     def _reset(self):
-        self._buffer[0] = _RESET
-        with self._bus_device_obj as spi:
-            spi.write(self._buffer, end=1)
+        buf = bytearray([_RESET])
+        try:
+            self._cs_pin.value(0)
+            self._spi_bus.write(buf)
+        finally:
+            self._cs_pin.value(1)
         sleep(0.010)
 
     def _set_mode(self, mode):
@@ -652,39 +594,42 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
     def _mod_register(self, register_addr, mask, new_value):
         """There appears to be an interface on the MCP2515 that allows for
         setting a register using a mask"""
-        self._buffer[0] = _BITMOD
-        self._buffer[1] = register_addr
-        self._buffer[2] = mask
-        self._buffer[3] = new_value
-        with self._bus_device_obj as spi:
-            spi.write(self._buffer, end=4)
+        buf = bytearray([_BITMOD, register_addr, mask, new_value])
+        try:
+            self._cs_pin.value(0)
+            self._spi_bus.write(buf)
+        finally:
+            self._cs_pin.value(1)
 
-    def _read_register(self, regsiter_addr):
-        self._buffer[0] = _READ
-        self._buffer[1] = regsiter_addr
+    def _read_register(self, register_addr):
+        buf = bytearray([_READ, register_addr])
+        try:
+            self._cs_pin.value(0)
+            self._spi_bus.write(buf)
+            buf = bytearray(1)
+            self._spi_bus.write_readinto(buf, buf)
+        finally:
+            self._cs_pin.value(1)
 
-        with self._bus_device_obj as spi:
-            spi.write(self._buffer, end=2)
-            self._buffer[0] = 0
-            spi.write_readinto(
-                self._buffer, self._buffer, out_start=0, out_end=1, in_start=0, in_end=1
-            )
-
-        return self._buffer[0]
+        return buf[0]
 
     def _read_status(self):
-        self._buffer[0] = _READ_STATUS
-        with self._bus_device_obj as spi:
-            spi.write(self._buffer, end=1)
-            spi.readinto(self._buffer, start=0, end=1)
-        return self._buffer[0]
+        buf = bytearray([_READ_STATUS])
+        try:
+            self._cs_pin.value(0)
+            self._spi_bus.write(buf)
+            self._spi_bus.readinto(buf)
+        finally:
+            self._cs_pin.value(1)
+        return buf[0]
 
-    def _set_register(self, regsiter_addr, register_value):
-        self._buffer[0] = _WRITE
-        self._buffer[1] = regsiter_addr
-        self._buffer[2] = register_value
-        with self._bus_device_obj as spi:
-            spi.write(self._buffer, end=3)
+    def _set_register(self, register_addr, register_value):
+        buf = bytearray([_WRITE, register_addr, register_value])
+        try:
+            self._cs_pin.value(0)
+            self._spi_bus.write(buf)
+        finally:
+            self._cs_pin.value(1)
 
     def _get_bus_status(self):
         """Get the status flags that report the state of the bus"""
@@ -819,18 +764,18 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
         Creating a listener is an expensive operation and can interfere with reception of messages
         by other listeners.
 
-    There is an implementation-defined maximum number of listeners and limit to the complexity of
-    the filters.
+        There is an implementation-defined maximum number of listeners and limit to the complexity of
+        the filters.
 
-    If the hardware cannot support all the requested matches, a ValueError is raised. Note that \
+        If the hardware cannot support all the requested matches, a ValueError is raised. Note that 
         generally there are some number of hardware filters shared among all fifos.
 
-    A message can be received by at most one Listener. If more than one listener matches a message,\
-         it is undefined which one actually receives it.
+        A message can be received by at most one Listener. If more than one listener matches a message,
+        it is undefined which one actually receives it.
 
-    An empty filter list causes all messages to be accepted.
+        An empty filter list causes all messages to be accepted.
 
-    Timeout dictates how long ``receive()`` will block.
+        Timeout dictates how long ``receive()`` will block.
 
         Args:
             match (Optional[Sequence[Match]], optional): [description]. Defaults to None.
@@ -848,7 +793,6 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
             )
 
         for match in matches:
-            self._dbg("match:", match)
             mask_index_used = self._create_mask(match)
             self._create_filter(match, mask_index=mask_index_used)
 
@@ -862,22 +806,3 @@ class MCP2515:  # pylint:disable=too-many-instance-attributes
                 self._create_mask(matches[-1])
 
         return Listener(self, timeout)
-
-    def deinit(self):
-        """Deinitialize this object, freeing its hardware resources"""
-        self._cs_pin.deinit()
-
-    def __enter__(self):
-        """Returns self, to allow the object to be used in a The with statement statement for \
-            resource control"""
-        return self
-
-    def __exit__(self, unused1, unused2, unused3):
-        """Calls deinit()"""
-        self.deinit()
-
-    ##################### End canio API ################
-
-    def _dbg(self, *args, **kwargs):
-        if self._debug:
-            print("DBG::\t\t", *args, **kwargs)

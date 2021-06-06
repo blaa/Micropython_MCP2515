@@ -1,85 +1,40 @@
 Introduction
 ============
 
-.. image:: https://readthedocs.org/projects/adafruit-circuitpython-mcp2515/badge/?version=latest
-    :target: https://circuitpython.readthedocs.io/projects/mcp2515/en/latest/
-    :alt: Documentation Status
-
-.. image:: https://img.shields.io/discord/327254708534116352.svg
-    :target: https://adafru.it/discord
-    :alt: Discord
-
-.. image:: https://github.com/adafruit/Adafruit_CircuitPython_MCP2515/workflows/Build%20CI/badge.svg
-    :target: https://github.com/adafruit/Adafruit_CircuitPython_MCP2515/actions
-    :alt: Build Status
-
-.. image:: https://img.shields.io/badge/code%20style-black-000000.svg
-    :target: https://github.com/psf/black
-    :alt: Code Style: Black
-
-A CircuitPython library for working with the MCP2515 CAN bus controller
-
+A pure micropython library for the MCP2515 CAN bus controller - migrated from
+the Adafruit CircuitPython library available here:
+https://github.com/adafruit/Adafruit_CircuitPython_MCP2515
 
 Dependencies
 =============
 This driver depends on:
 
-* `Adafruit CircuitPython <https://github.com/adafruit/circuitpython>`_
-* `Bus Device <https://github.com/adafruit/Adafruit_CircuitPython_BusDevice>`_
+* Micropython (SPI device and Pin), enough ROM.
 
-Please ensure all dependencies are available on the CircuitPython filesystem.
-This is easily achieved by downloading
-`the Adafruit library and driver bundle <https://circuitpython.org/libraries>`_.
-
-Installing from PyPI
-=====================
-
-On supported GNU/Linux systems like the Raspberry Pi, you can install the driver locally `from
-PyPI <https://pypi.org/project/adafruit-circuitpython-mcp2515/>`_. To install for current user:
-
-.. code-block:: shell
-
-    pip3 install adafruit-circuitpython-mcp2515
-
-To install system-wide (this may be required in some cases):
-
-.. code-block:: shell
-
-    sudo pip3 install adafruit-circuitpython-mcp2515
-
-To install in a virtual environment in your current project:
-
-.. code-block:: shell
-
-    mkdir project-name && cd project-name
-    python3 -m venv .env
-    source .env/bin/activate
-    pip3 install adafruit-circuitpython-mcp2515
+Basic functionality tested on ESP32 and STM32F411CE (WeAct) on Micropython 1.15.
 
 Usage Example
 =============
 
 .. code-block:: python3
 
-    import board
-    import busio
-    import digitalio
-    import adafruit_mcp2515
+    from machine import SPI, Pin
+    import mcp2515
 
-    CS_PIN = 5
-    cs = digitalio.DigitalInOut(board.D5)
-    cs.direction = digitalio.Direction.OUTPUT
-    spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
-    mcp = adafruit_mcp2515.MCP2515(spi, cs)
+    spi_bus = SPI(1)
+    cs_pin = Pin("A4", Pin.OUT)
+    can = mcp2515.MCP2515(spi_bus, cs_pin, loopback=False, silent=False)
 
-Contributing
-============
+    message = Message(id=0xFFAA, data=b"hello", extended=True)
+    can.send(message)
 
-Contributions are welcome! Please read our `Code of Conduct
-<https://github.com/adafruit/Adafruit_CircuitPython_MCP2515/blob/master/CODE_OF_CONDUCT.md>`_
-before contributing to help this project stay welcoming.
+    print("1 bufs", can.state, can._tx_buffers_in_use)
+    print("  tx errors", can.transmit_error_count, "rx_errors", can.receive_error_count)
+
 
 Documentation
 =============
+
+This might not be relevant to micropython:
 
 For information on building library documentation, please check out `this guide <https://learn.adafruit.com/creating-and-sharing-a-circuitpython-library/sharing-our-docs-on-readthedocs#sphinx-5-1>`_.
